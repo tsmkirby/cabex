@@ -1,0 +1,15 @@
+[general]
+name=Cable Explode
+qgisMinimumVersion=3.34
+description=Draw overlapping cables a short ground distance apart without changing geometry.
+version=0.1.0
+author=Ryan Kirby
+email=ryan.kirby@local
+about=View aid for outside plant maps. Coincident cable lines are drawn one gap apart, in meters at scale, and only where they actually overlap. Stored geometries stay where they are.
+category=Vector
+icon=
+experimental=False
+deprecated=False
+tags=osp,cables,symbology
+server=False
+hasProcessingProvider=False
