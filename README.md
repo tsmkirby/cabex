@@ -55,6 +55,7 @@ A piece of a cable moves only when it lies on top of another cable.
 - Neighbors in that stack are drawn one full separation apart. The default separation is 0.2 m, so two stacked cables sit 0.1 m to either side of the real path. A larger stack is wider than the separation.
 - The stack stays centered on the real path.
 - The rest of the line, including the ends outside the shared run, stays on the stored coordinates.
+- A cable that ends inside a stack bends back to its stored end over a short lead-in, three times its sideways shift and never more than a third of its length. A cable split at a splice enclosure, or ending at a pole or device, is drawn entering it, while cables that pass through keep their lanes.
 
 Crossings, short shared stubs, and cables that only pass nearby stay put. Turning the tool off restores the original symbols.
 

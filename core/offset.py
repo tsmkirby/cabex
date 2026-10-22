@@ -19,6 +19,10 @@ _TIE = 1e-6
 _ON_TOP_M = 0.1
 _PARALLEL = math.sin(math.radians(5.0))
 _GRID_M = 50.0
+# A cable end drawn apart from its stack bends back to its stored end over
+# this many times its sideways shift, so it visibly enters the enclosure,
+# pole, or device it ends at.
+_TAPER_RATIO = 3.0
 
 
 @dataclass(frozen=True)
@@ -92,7 +96,38 @@ def _display_line(index: int, lines: Sequence[CableLine], intervals: dict[int, l
             output.extend(chunk[1:])
         else:
             output.extend(chunk)
-    return output or list(line.coords)
+    if not output:
+        return list(line.coords)
+    budget = stations[-1] / 3.0
+    output = _taper(output, line.coords[0], gap, budget)
+    output.reverse()
+    output = _taper(output, line.coords[-1], gap, budget)
+    output.reverse()
+    return output
+
+
+def _taper(points: list[Point], end: Point, gap: float, budget: float) -> list[Point]:
+    """Bend the start of a drawn line back onto its stored end point.
+
+    The bend is a straight lead-in from ``end`` to the drawn line, reached
+    ``_TAPER_RATIO`` times the shift along it (at least that many gaps),
+    and never more than ``budget`` along the line.
+    """
+    shift = _distance(points[0], end)
+    if shift <= _TIE or len(points) < 2:
+        return points
+    length = min(max(shift, gap) * _TAPER_RATIO, budget)
+    if length <= _EPS:
+        return points
+    walked = 0.0
+    for index in range(1, len(points)):
+        step = _distance(points[index - 1], points[index])
+        if walked + step >= length - _EPS:
+            cut = _lerp(points[index - 1], points[index], (length - walked) / step if step > _EPS else 0.0)
+            rest = points[index:] if not _near(cut, points[index]) else points[index + 1:]
+            return [end, cut] + rest
+        walked += step
+    return [end, points[-1]]
 
 
 def _lane_offsets(members: Sequence[CableLine], sample: Point, gap: float) -> tuple[dict[tuple, float], Point]:

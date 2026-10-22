@@ -24,13 +24,15 @@ class OffsetTests(unittest.TestCase):
             ],
             gap,
         )
-        y_a = pair[("L", 1)][0][1]
-        y_b = pair[("L", 2)][0][1]
+        y_a = pair[("L", 1)][1][1]
+        y_b = pair[("L", 2)][1][1]
         self.assertAlmostEqual(y_a, -gap / 2)
         self.assertAlmostEqual(y_b, gap / 2)
         self.assertAlmostEqual((y_a + y_b) / 2, 0.0)
-        self.assertTrue(all(abs(point[1] - y_a) < 1e-9 for point in pair[("L", 1)]))
-        self.assertTrue(all(abs(point[1] - y_b) < 1e-9 for point in pair[("L", 2)]))
+        self.assertTrue(all(abs(point[1] - y_a) < 1e-9 for point in pair[("L", 1)][1:-1]))
+        self.assertTrue(all(abs(point[1] - y_b) < 1e-9 for point in pair[("L", 2)][1:-1]))
+        for key in (("L", 1), ("L", 2)):  # both ends return to the stored ends
+            self.assertEqual((pair[key][0], pair[key][-1]), ((0.0, 0.0), (100.0, 0.0)))
 
     def test_coincident_triple_keeps_the_middle_line(self):
         gap = 1.5
@@ -43,10 +45,10 @@ class OffsetTests(unittest.TestCase):
             ],
             gap,
         )
-        self.assertAlmostEqual(triple[("L", 1)][0][1], -gap)
+        self.assertAlmostEqual(triple[("L", 1)][1][1], -gap)
         self.assertEqual(triple[("L", 2)], list(original))
-        self.assertAlmostEqual(triple[("L", 3)][0][1], gap)
-        self.assertAlmostEqual(sum(triple[key][0][1] for key in (("L", 1), ("L", 2), ("L", 3))) / 3, 0.0)
+        self.assertAlmostEqual(triple[("L", 3)][1][1], gap)
+        self.assertAlmostEqual(sum(triple[key][1][1] for key in (("L", 1), ("L", 2), ("L", 3))) / 3, 0.0)
 
     def test_shared_middle_leaves_the_outer_vertices(self):
         gap = 2.0
@@ -94,8 +96,8 @@ class OffsetTests(unittest.TestCase):
             ],
             gap,
         )
-        y_a = displayed[("L", 1)][0][1]
-        y_b = displayed[("L", 2)][0][1]
+        y_a = displayed[("L", 1)][1][1]
+        y_b = displayed[("L", 2)][1][1]
         self.assertAlmostEqual(abs(y_a - y_b), gap)
         self.assertAlmostEqual(y_a + y_b, 0.0)
         self.assertLess(y_a * y_b, 0)
@@ -116,8 +118,8 @@ class OffsetTests(unittest.TestCase):
         second_half = ys_at(cable_a, 80)
         self.assertTrue(first_half and all(abs(y + gap / 2) < 1e-6 for y in first_half))
         self.assertTrue(second_half and all(abs(y + gap / 2) < 1e-6 for y in second_half))
-        self.assertAlmostEqual(displayed[("L", 2)][0][1], gap / 2)
-        self.assertAlmostEqual(displayed[("L", 3)][0][1], gap / 2)
+        self.assertAlmostEqual(displayed[("L", 2)][1][1], gap / 2)
+        self.assertAlmostEqual(displayed[("L", 3)][1][1], gap / 2)
 
     def test_nearby_but_separate_lines_stay_put(self):
         first = ((0, 0), (40, 0))
@@ -154,15 +156,14 @@ class OffsetTests(unittest.TestCase):
         gap = 2.0
         displayed = displace(
             [
-                line(("L", 1), "A", ((0, 0), (10, 0))),
-                line(("L", 2), "B", ((0, 0), (1, 0), (10, 5))),
+                line(("L", 1), "A", ((-30, 0), (10, 0))),
+                line(("L", 2), "B", ((-10, 0), (-9, 0), (0, 5))),
             ],
             gap,
             min_overlap=1.0,
         )
-        shared = [point for point in displayed[("L", 1)] if point[0] < 0.5]
-        self.assertTrue(shared)
-        self.assertTrue(all(abs(point[1] + gap / 2) < 1e-6 for point in shared))
+        self.assertIn((-10.0, -gap / 2), displayed[("L", 1)])
+        self.assertIn((-9.0, -gap / 2), displayed[("L", 1)])
         self.assertIn((10, 0), displayed[("L", 1)])
 
     def test_slightly_offset_copies_still_count_as_stacked(self):
@@ -174,8 +175,8 @@ class OffsetTests(unittest.TestCase):
             ],
             gap,
         )
-        y_a = displayed[("L", 1)][0][1]
-        y_b = displayed[("L", 2)][0][1]
+        y_a = displayed[("L", 1)][1][1]
+        y_b = displayed[("L", 2)][1][1]
         self.assertAlmostEqual(y_b - y_a, gap)
         self.assertAlmostEqual((y_a + y_b) / 2, 0.025)
 
@@ -187,10 +188,49 @@ class OffsetTests(unittest.TestCase):
             gap,
         )
         start_gap = math.hypot(
-            displayed[("L", 1)][0][0] - displayed[("L", 2)][0][0],
-            displayed[("L", 1)][0][1] - displayed[("L", 2)][0][1],
+            displayed[("L", 1)][1][0] - displayed[("L", 2)][1][0],
+            displayed[("L", 1)][1][1] - displayed[("L", 2)][1][1],
         )
         self.assertAlmostEqual(start_gap, gap)
+
+    def test_cables_split_at_an_enclosure_enter_it_and_through_cables_do_not(self):
+        gap = 0.2
+        enclosure = (50.0, 0.0)
+        displayed = displace(
+            [
+                line(("L", 1), "A1", ((0, 0), enclosure)),
+                line(("L", 2), "A2", (enclosure, (100, 0))),
+                line(("L", 3), "B", ((0, 0), (100, 0))),
+                line(("L", 4), "C", ((0, 0), (100, 0))),
+            ],
+            gap,
+        )
+        self.assertEqual(displayed[("L", 1)][-1], enclosure)
+        self.assertEqual(displayed[("L", 2)][0], enclosure)
+        # The lead-in is shallow: three times the sideways shift.
+        lead_in = displayed[("L", 1)][-2]
+        self.assertAlmostEqual(enclosure[0] - lead_in[0], 3 * abs(lead_in[1]))
+        # C passes the enclosure in its own lane.
+        self.assertTrue(all(abs(y - gap) < 1e-9 for y in ys_at(displayed[("L", 4)], 50, window=5)))
+
+    def test_lead_in_never_takes_more_than_a_third_of_a_short_cable(self):
+        displayed = displace(
+            [line(("L", 1), "A", ((0, 0), (3, 0))), line(("L", 2), "B", ((0, 0), (3, 0)))],
+            2.0,
+        )
+        for points in displayed.values():
+            self.assertEqual((points[0], points[-1]), ((0.0, 0.0), (3.0, 0.0)))
+            self.assertAlmostEqual(points[1][0], 1.0)
+            self.assertAlmostEqual(points[-2][0], 2.0)
+
+    def test_ends_off_the_shared_run_are_untouched(self):
+        displayed = displace(
+            [line(("L", 1), "A", ((-50, 0), (150, 0))), line(("L", 2), "B", ((0, 0), (100, 0)))],
+            1.0,
+        )
+        self.assertEqual(displayed[("L", 1)][0], (-50.0, 0.0))
+        self.assertEqual(displayed[("L", 1)][-1], (150.0, 0.0))
+        self.assertNotIn((-50.0, 0.0), displayed[("L", 1)][1:])
 
     def test_a_single_cable_is_unchanged(self):
         coords = ((0, 0), (5, 1))
