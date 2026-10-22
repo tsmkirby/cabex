@@ -188,6 +188,15 @@ class ExplodedToolTests(unittest.TestCase):
         panel.form_button.click()  # nothing left to act on; must not raise
         self.assertEqual(len(self.iface.forms), 1)
 
+    def test_toolbar_buttons_are_square_icons_with_accessible_names(self):
+        self.assertEqual(len(self.plugin._actions), 4)
+        for action in self.plugin._actions:
+            self.assertFalse(action.icon().pixmap(24, 24).isNull(), action.text())
+            self.assertTrue(action.toolTip().startswith(action.text()))
+            button = self.plugin.toolbar.widgetForAction(action)
+            self.assertEqual((button.width(), button.height()), (32, 32))
+            self.assertEqual(button.accessibleName(), action.text())
+
 
 if __name__ == '__main__':
     unittest.main()

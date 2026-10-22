@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 import traceback
+from pathlib import Path
 
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import QSize, Qt, QTimer
+from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
@@ -302,12 +304,13 @@ class CableExplodePlugin:
     def initGui(self):
         self.toolbar = self.iface.addToolBar("Cable Explode")
         self.toolbar.setObjectName("CableExplode")
-        self._toggle = QAction("Explode cables", self.iface.mainWindow())
+        self.toolbar.setIconSize(QSize(24, 24))
+        self._toggle = QAction(_icon("explode"), "Explode cables", self.iface.mainWindow())
         self._toggle.setCheckable(True)
-        self._toggle.setToolTip("Draw stacked cables apart. Does not change geometry.")
+        self._toggle.setToolTip("Explode cables: draw stacked cables apart. Does not change geometry.")
         self._toggle.toggled.connect(self._toggled)
-        settings_action = QAction("Explode settings", self.iface.mainWindow())
-        settings_action.setToolTip("Set the separation, minimum shared length, and layers.")
+        settings_action = QAction(_icon("settings"), "Explode settings", self.iface.mainWindow())
+        settings_action.setToolTip("Explode settings: set the separation, minimum shared length, and layers.")
         settings_action.triggered.connect(self._open_settings)
         canvas = self.iface.mapCanvas()
         self._panel = IdentifyPanel(self.iface, self.iface.mainWindow())
@@ -316,19 +319,22 @@ class CableExplodePlugin:
         self._select_tool = ExplodedSelectTool(canvas, self)
         self._identify_tool = ExplodedIdentifyTool(canvas, self, self._panel)
         select_action = self._tool_action(
-            "Select exploded cables", self._select_tool,
-            "Select cables where they are drawn apart. Click a stack again for the next cable. "
+            "select", "Select exploded cables", self._select_tool,
+            "Select exploded cables: pick cables where they are drawn apart. Click a stack again for the next cable. "
             "Shift or Ctrl click toggles; drag a box to select several.",
         )
         identify_action = self._tool_action(
-            "Identify exploded cables", self._identify_tool,
-            "List every cable drawn at the clicked spot, with its attributes.",
+            "identify", "Identify exploded cables", self._identify_tool,
+            "Identify exploded cables: list every cable drawn at the clicked spot, with its attributes.",
         )
-        self.toolbar.addAction(self._toggle)
-        self.toolbar.addAction(settings_action)
-        self.toolbar.addAction(select_action)
-        self.toolbar.addAction(identify_action)
         self._actions = [self._toggle, settings_action, select_action, identify_action]
+        for action in self._actions:
+            self.toolbar.addAction(action)
+            action.setStatusTip(action.toolTip())
+            button = self.toolbar.widgetForAction(action)
+            if button is not None:
+                button.setFixedSize(32, 32)
+                button.setAccessibleName(action.text())
         self._timer = QTimer()
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._rebuild)
@@ -339,8 +345,8 @@ class CableExplodePlugin:
         project.layersWillBeRemoved.connect(self._on_layers_removed)
         project.crsChanged.connect(self._schedule)
 
-    def _tool_action(self, text, tool, tip):
-        action = QAction(text, self.iface.mainWindow())
+    def _tool_action(self, icon, text, tool, tip):
+        action = QAction(_icon(icon), text, self.iface.mainWindow())
         action.setCheckable(True)
         action.setToolTip(tip)
         tool.setAction(action)  # QGIS unchecks the action when another map tool takes over.
@@ -677,6 +683,10 @@ class CableExplodePlugin:
             selected = set(_as_list(settings.value(_LAYERS_KEY, [])))
             return [layer for layer in layers if layer.id() in selected]
         return [layer for layer in layers if _is_cable_layer(layer)]
+
+
+def _icon(name):
+    return QIcon(str(Path(__file__).parent / "icons" / f"{name}.svg"))
 
 
 def _is_cable_layer(layer):
