@@ -37,6 +37,7 @@ from qgis.core import (
 )
 
 from .core.offset import CableLine, displace
+from .tools import ExplodedIdentifyTool, ExplodedSelectTool, IdentifyPanel
 
 _GAP_KEY = "cable_explode/gap_m"
 _MIN_OVERLAP_KEY = "cable_explode/min_overlap_m"
@@ -294,6 +295,9 @@ class CableExplodePlugin:
         self._states = {}
         self._watches = {}
         self._updating = False
+        self._select_tool = None
+        self._identify_tool = None
+        self._panel = None
 
     def initGui(self):
         self.toolbar = self.iface.addToolBar("Cable Explode")
@@ -305,9 +309,26 @@ class CableExplodePlugin:
         settings_action = QAction("Explode settings", self.iface.mainWindow())
         settings_action.setToolTip("Set the separation, minimum shared length, and layers.")
         settings_action.triggered.connect(self._open_settings)
+        canvas = self.iface.mapCanvas()
+        self._panel = IdentifyPanel(self.iface, self.iface.mainWindow())
+        self.iface.addDockWidget(Qt.RightDockWidgetArea, self._panel)
+        self._panel.hide()
+        self._select_tool = ExplodedSelectTool(canvas, self)
+        self._identify_tool = ExplodedIdentifyTool(canvas, self, self._panel)
+        select_action = self._tool_action(
+            "Select exploded cables", self._select_tool,
+            "Select cables where they are drawn apart. Click a stack again for the next cable. "
+            "Shift or Ctrl click toggles; drag a box to select several.",
+        )
+        identify_action = self._tool_action(
+            "Identify exploded cables", self._identify_tool,
+            "List every cable drawn at the clicked spot, with its attributes.",
+        )
         self.toolbar.addAction(self._toggle)
         self.toolbar.addAction(settings_action)
-        self._actions = [self._toggle, settings_action]
+        self.toolbar.addAction(select_action)
+        self.toolbar.addAction(identify_action)
+        self._actions = [self._toggle, settings_action, select_action, identify_action]
         self._timer = QTimer()
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._rebuild)
@@ -318,8 +339,50 @@ class CableExplodePlugin:
         project.layersWillBeRemoved.connect(self._on_layers_removed)
         project.crsChanged.connect(self._schedule)
 
+    def _tool_action(self, text, tool, tip):
+        action = QAction(text, self.iface.mainWindow())
+        action.setCheckable(True)
+        action.setToolTip(tip)
+        tool.setAction(action)  # QGIS unchecks the action when another map tool takes over.
+        action.triggered.connect(lambda checked, tool=tool: self._activate_tool(tool, checked))
+        return action
+
+    def _activate_tool(self, tool, checked):
+        canvas = self.iface.mapCanvas()
+        if checked:
+            canvas.setMapTool(tool)
+        elif canvas.mapTool() is tool:
+            canvas.unsetMapTool(tool)
+
+    def pick_sources(self):
+        """Layers the exploded tools search, with each one's drawn geometries and search pad.
+
+        With explode off this is the same layers and their stored geometry.
+        """
+        project = QgsProject.instance()
+        sources = []
+        for layer in self._participating():
+            state = self._states.get(layer.id())
+            renderer = layer.renderer()
+            if state is not None and renderer is not None and renderer.type() == ExplodeRenderer.TYPE:
+                sources.append((layer, dict(state.wrapper.geometries), state.wrapper.extent_pad))
+            elif project.mapLayer(layer.id()) is not None:
+                sources.append((layer, {}, 0.0))
+        return sources
+
     def unload(self):
         self._disable()
+        canvas = self.iface.mapCanvas()
+        for tool in (self._select_tool, self._identify_tool):
+            if tool is not None and canvas is not None and canvas.mapTool() is tool:
+                canvas.unsetMapTool(tool)
+        self._select_tool = None
+        self._identify_tool = None
+        if self._panel is not None:
+            self._panel.clear_highlight()
+            self.iface.removeDockWidget(self._panel)
+            self._panel.deleteLater()
+            self._panel = None
         project = QgsProject.instance()
         for signal, slot in (
             (project.writeProject, self._on_write_project),
@@ -531,6 +594,8 @@ class CableExplodePlugin:
                 pass
 
     def _on_layers_removed(self, layer_ids):
+        if self._panel is not None:
+            self._panel.reset(list(layer_ids))
         project = QgsProject.instance()
         for layer_id in layer_ids:
             layer = project.mapLayer(layer_id)
@@ -538,6 +603,8 @@ class CableExplodePlugin:
             self._unwatch(layer)
 
     def _on_cleared(self):
+        if self._panel is not None:
+            self._panel.reset()
         if self._timer is not None:
             self._timer.stop()
         self._states.clear()
