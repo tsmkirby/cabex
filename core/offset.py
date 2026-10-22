@@ -23,6 +23,10 @@ _GRID_M = 50.0
 # this many times its sideways shift, so it visibly enters the enclosure,
 # pole, or device it ends at.
 _TAPER_RATIO = 3.0
+# Where a stack changes lanes, every cable in it ramps over the same length,
+# this many gaps. Blending all lanes over one shared length keeps their order,
+# so the ramps run side by side instead of stepping across each other.
+_RAMP_GAPS = 5.0
 
 
 @dataclass(frozen=True)
@@ -71,39 +75,54 @@ def displace(
     ]
     displayed = dict(originals)
     for index, line in enumerate(prepared):
-        displayed[line.key] = _display_line(index, prepared, intervals[index], gap, tolerance)
+        displayed[line.key] = _display_line(index, prepared, intervals, gap, tolerance)
     return displayed
 
 
 def _display_line(
     index: int,
     lines: Sequence[CableLine],
-    intervals: dict[int, list[tuple[float, float]]],
+    all_intervals: Sequence[dict[int, list[tuple[float, float]]]],
     gap: float,
     tolerance: float = _ON_TOP_M,
 ) -> list[Point]:
     line = lines[index]
     stations = _stations(line.coords)
-    pieces = _pieces(stations[-1], intervals)
+    pieces = _pieces(stations[-1], all_intervals[index])
     if len(pieces) == 1 and not pieces[0][2]:
         return list(line.coords)
 
-    output: list[Point] = []
+    chunks: list[list[Point]] = []
     for start, end, neighbors in pieces:
         part = _slice(line.coords, stations, start, end)
         if not neighbors:
             chunk = part
         else:
-            members = [line] + [lines[other] for other in sorted(neighbors)]
-            sample = _point_at(line.coords, stations, (start + end) / 2.0)
-            ends = _ending_members(members, (_point_at(line.coords, stations, start),
-                                             _point_at(line.coords, stations, end)), tolerance)
-            offsets, normal = _lane_offsets(members, sample, gap, ends)
-            chunk = _offset_points(part, offsets.get(line.key, 0.0), normal)
-        if output and chunk and _near(output[-1], chunk[0]):
-            output.extend(chunk[1:])
-        else:
-            output.extend(chunk)
+            member_indexes = [index] + sorted(neighbors)
+            members = [lines[other] for other in member_indexes]
+            # Every member of this stack sees the same nearby cables and boundary
+            # points, so they all agree on the layout.
+            nearby = set(member_indexes)
+            for other in member_indexes:
+                nearby.update(all_intervals[other])
+            candidates = [lines[other] for other in sorted(nearby)]
+            layouts = [_node_layout(members, _point_at(line.coords, stations, station), candidates, tolerance)
+                       for station in (start, end)]
+            active = [layout for layout in layouts if layout is not None]
+            if len(active) == 2 and active[0] != active[1]:
+                # Different cables end at each end: switch layouts halfway, away from both points.
+                middle = (start + end) / 2.0
+                halves = [(start, middle, layouts[0]), (middle, end, layouts[1])]
+            else:
+                halves = [(start, end, active[0] if active else None)]
+            for first, last, ends in halves:
+                sample = _point_at(line.coords, stations, (first + last) / 2.0)
+                offsets, normal = _lane_offsets(members, sample, gap, ends)
+                chunks.append(_offset_points(_slice(line.coords, stations, first, last),
+                                             offsets.get(line.key, 0.0), normal))
+            continue
+        chunks.append(chunk)
+    output = _join(chunks, gap * _RAMP_GAPS)
     if not output:
         return list(line.coords)
     budget = stations[-1] / 3.0
@@ -112,6 +131,51 @@ def _display_line(
     output = _taper(output, line.coords[-1], gap, budget)
     output.reverse()
     return output
+
+
+def _join(chunks: Sequence[list[Point]], ramp: float) -> list[Point]:
+    """Join consecutive drawn pieces, ramping across any change of lane.
+
+    The ramp is centered on the join and takes at most a third of either
+    piece, so a short piece keeps a flat middle.
+    """
+    output: list[Point] = []
+    previous = 0.0
+    for chunk in chunks:
+        if not chunk:
+            continue
+        length = _length(chunk)
+        if not output or _near(output[-1], chunk[0]):
+            output.extend(chunk[1:] if output else chunk)
+        else:
+            half = min(ramp / 2.0, previous / 3.0, length / 3.0)
+            if half <= _EPS:
+                output.extend(chunk)
+            else:
+                output = _cut_end(output, half)
+                output.extend(_cut_start(chunk, half))
+        previous = length
+    return output
+
+
+def _length(points: Sequence[Point]) -> float:
+    return sum(_distance(start, end) for start, end in zip(points, points[1:]))
+
+
+def _cut_start(points: Sequence[Point], length: float) -> list[Point]:
+    """``points`` without its first ``length`` along the line."""
+    walked = 0.0
+    for index in range(1, len(points)):
+        step = _distance(points[index - 1], points[index])
+        if walked + step > length + _EPS:
+            cut = _lerp(points[index - 1], points[index], (length - walked) / step)
+            return [cut] + list(points[index:])
+        walked += step
+    return [points[-1]]
+
+
+def _cut_end(points: Sequence[Point], length: float) -> list[Point]:
+    return list(reversed(_cut_start(list(reversed(points)), length)))
 
 
 def _taper(points: list[Point], end: Point, gap: float, budget: float) -> list[Point]:
@@ -138,27 +202,37 @@ def _taper(points: list[Point], end: Point, gap: float, budget: float) -> list[P
     return [end, points[-1]]
 
 
-def _ending_members(members: Sequence[CableLine], boundaries: Sequence[Point], tolerance: float) -> frozenset:
-    """Keys of the stack members that end at a boundary of this piece while others carry on.
+def _ends_at(line: CableLine, point: Point, tolerance: float) -> bool:
+    return _distance(line.coords[0], point) <= tolerance or _distance(line.coords[-1], point) <= tolerance
 
-    Each member sees the same boundary points, so every line in the stack
-    agrees on the result. A boundary where every member ends, such as a
-    shared terminal, marks nobody.
+
+def _node_layout(
+    members: Sequence[CableLine],
+    point: Point,
+    candidates: Sequence[CableLine],
+    tolerance: float,
+) -> frozenset | None:
+    """The members that end at ``point``, when it is a node such as a splice enclosure.
+
+    A node is a point where some stacked cables end and others pass by. The
+    cables ending there may be on the other side of it, as when cables only
+    enter an enclosure from one side, so stacked cables near this stack count
+    too. Returns None when the point is not a node, including a shared
+    terminal where every member ends.
     """
-    found = set()
-    for point in boundaries:
-        here = {line.key for line in members
-                if _distance(line.coords[0], point) <= tolerance or _distance(line.coords[-1], point) <= tolerance}
-        if here and len(here) < len(members):
-            found |= here
-    return frozenset(found)
+    ending = frozenset(line.key for line in members if _ends_at(line, point, tolerance))
+    if len(ending) == len(members):
+        return None
+    if ending or any(_ends_at(line, point, tolerance) for line in candidates):
+        return ending
+    return None
 
 
 def _lane_offsets(
     members: Sequence[CableLine],
     sample: Point,
     gap: float,
-    ends: frozenset = frozenset(),
+    ends: frozenset | None = None,
 ) -> tuple[dict[tuple, float], Point]:
     reference = min(members, key=lambda line: (line.cable_id, line.key))
     origin, tangent = _closest_point_and_tangent(reference.coords, sample)
@@ -171,20 +245,32 @@ def _lane_offsets(
             signed = 0.0
         ranked.append((signed, line.cable_id, line.key, line))
     ranked.sort()
-    if ends and len(ends) < len(ranked):
-        # Cables that end here take the middle lanes, so they run straight into
-        # the enclosure or pole and no through cable is drawn across it.
-        # Through cables keep the side they would have had anyway.
-        middle = (len(ranked) - 1) / 2.0
-        left = [item for rank, item in enumerate(ranked) if item[2] not in ends and rank <= middle]
-        right = [item for rank, item in enumerate(ranked) if item[2] not in ends and rank > middle]
-        ranked = left + [item for item in ranked if item[2] in ends] + right
     count = len(ranked)
     mean = sum(item[0] for item in ranked) / count
+    if ends is None:
+        lanes = [rank - (count - 1) / 2.0 for rank in range(count)]
+    else:
+        # At a node the cables passing by keep fixed lanes, one to three gaps
+        # to one side, however many cables end there, so they run straight
+        # past it on both sides. The cables that end there fill lanes from the
+        # stored line outward on the other side: the first runs straight into
+        # the node and the rest bend into it.
+        # Longer cables sit farther out on the pass-by side and nearer the
+        # stored line on the ending side. A cable that carries on to the next
+        # node is then already beside the pass-by lanes, and when it joins
+        # them every lane shifts over together instead of crossing.
+        def length(item):
+            return _stations(item[3].coords)[-1]
+
+        through = sorted((item for item in ranked if item[2] not in ends),
+                         key=lambda item: (length(item), item[1], item[2]))
+        ending = sorted((item for item in ranked if item[2] in ends),
+                        key=lambda item: (-length(item), item[1], item[2]))
+        ranked = through + ending
+        lanes = [float(rank + 1) for rank in range(len(through))] + [-float(rank) for rank in range(len(ending))]
     offsets = {}
-    for rank, (signed, _cable_id, key, _line) in enumerate(ranked):
-        target = mean + (rank - (count - 1) / 2.0) * gap
-        offsets[key] = target - signed
+    for lane, (signed, _cable_id, key, _line) in zip(lanes, ranked):
+        offsets[key] = mean + lane * gap - signed
     return offsets, normal
 
 

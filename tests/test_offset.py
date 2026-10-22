@@ -14,6 +14,14 @@ def ys_at(coords, x, window=1.0):
     return [point[1] for point in coords if abs(point[0] - x) <= window]
 
 
+def y_at(coords, x):
+    """The drawn y where a line along x crosses ``x``, between vertices too."""
+    for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
+        if min(x0, x1) <= x <= max(x0, x1) and x0 != x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return None
+
+
 class OffsetTests(unittest.TestCase):
     def test_coincident_pair_is_centered_one_gap_apart(self):
         gap = 2.0
@@ -63,9 +71,10 @@ class OffsetTests(unittest.TestCase):
         for point in ((0, 0), (10, 0), (90, 0), (100, 0)):
             self.assertIn(point, displayed)
         self.assertNotIn((50, 0), displayed)
+        # B ends at both of its ends inside A's run, so A passes it one gap to the side.
         middle = [point for point in displayed if abs(point[0] - 50) <= 1]
         self.assertTrue(middle)
-        self.assertTrue(all(abs(point[1] + gap / 2) < 1e-6 for point in middle))
+        self.assertTrue(all(abs(point[1] - gap) < 1e-6 for point in middle))
 
     def test_line_farther_than_the_gap_is_unchanged(self):
         first = ((0, 0), (10, 0), (20, 0))
@@ -116,10 +125,11 @@ class OffsetTests(unittest.TestCase):
         self.assertIn((50, 0), cable_a)
         first_half = ys_at(cable_a, 20)
         second_half = ys_at(cable_a, 80)
-        self.assertTrue(first_half and all(abs(y + gap / 2) < 1e-6 for y in first_half))
-        self.assertTrue(second_half and all(abs(y + gap / 2) < 1e-6 for y in second_half))
-        self.assertAlmostEqual(displayed[("L", 2)][1][1], gap / 2)
-        self.assertAlmostEqual(displayed[("L", 3)][1][1], gap / 2)
+        # B and C end inside A's run, so A passes each one gap to the side and they stay on their lines.
+        self.assertTrue(first_half and all(abs(y - gap) < 1e-6 for y in first_half))
+        self.assertTrue(second_half and all(abs(y - gap) < 1e-6 for y in second_half))
+        self.assertEqual(displayed[("L", 2)], [(0.0, 0.0), (40.0, 0.0)])
+        self.assertEqual(displayed[("L", 3)], [(60.0, 0.0), (100.0, 0.0)])
 
     def test_nearby_but_separate_lines_stay_put(self):
         first = ((0, 0), (40, 0))
@@ -162,8 +172,7 @@ class OffsetTests(unittest.TestCase):
             gap,
             min_overlap=1.0,
         )
-        self.assertIn((-10.0, -gap / 2), displayed[("L", 1)])
-        self.assertIn((-9.0, -gap / 2), displayed[("L", 1)])
+        self.assertAlmostEqual(y_at(displayed[("L", 1)], -9.5), gap)
         self.assertIn((10, 0), displayed[("L", 1)])
 
     def test_slightly_offset_copies_still_count_as_stacked(self):
@@ -193,53 +202,70 @@ class OffsetTests(unittest.TestCase):
         )
         self.assertAlmostEqual(start_gap, gap)
 
-    def test_cables_split_at_an_enclosure_take_the_middle_lane_into_it(self):
+    def enclosure(self, n_in, n_out, gap=0.2):
+        """Three cables pass an enclosure at x = 50; ``n_in`` end there and ``n_out`` start there."""
+        lines = [line(("T", i), f"T{i}", ((0, 0), (100, 0))) for i in range(1, 4)]
+        lines += [line(("I", i), f"IN{i}", ((0, 0), (50, 0))) for i in range(1, n_in + 1)]
+        lines += [line(("O", i), f"OUT{i}", ((50, 0), (100, 0))) for i in range(1, n_out + 1)]
+        return displace(lines, gap)
+
+    def test_enclosure_scenarios_pass_by_cables_hold_their_lanes(self):
+        gap = 0.2
+        for n_in, n_out in ((1, 1), (1, 2), (1, 6), (3, 6), (1, 0)):
+            with self.subTest(n_in=n_in, n_out=n_out):
+                displayed = self.enclosure(n_in, n_out, gap)
+                for i in range(1, 4):
+                    # Same lane on both sides of the enclosure, one to three gaps clear of it.
+                    points = displayed[("T", i)]
+                    for x in (20, 49.9, 50.1, 80):
+                        self.assertAlmostEqual(y_at(points, x), i * gap, msg=(x, points))
+
+    def test_enclosure_scenarios_cables_in_and_out_enter_the_enclosure(self):
         gap = 0.2
         enclosure = (50.0, 0.0)
-        displayed = displace(
-            [
-                line(("L", 1), "A1", ((0, 0), enclosure)),
-                line(("L", 2), "A2", (enclosure, (100, 0))),
-                line(("L", 3), "B", ((0, 0), (100, 0))),
-                line(("L", 4), "C", ((0, 0), (100, 0))),
-            ],
-            gap,
-        )
-        # The spliced cable runs straight into the enclosure on the stored line.
-        self.assertEqual(displayed[("L", 1)], [(0.0, 0.0), enclosure])
-        self.assertEqual(displayed[("L", 2)], [enclosure, (100.0, 0.0)])
-        # Through cables pass on either side, one gap away, without jogging.
-        for key, side in ((("L", 3), -gap), (("L", 4), gap)):
-            self.assertTrue(all(abs(y - side) < 1e-9 for y in ys_at(displayed[key], 50, window=10)))
+        for n_in, n_out in ((1, 1), (1, 2), (1, 6), (3, 6)):
+            with self.subTest(n_in=n_in, n_out=n_out):
+                displayed = self.enclosure(n_in, n_out, gap)
+                for side, count in (("I", n_in), ("O", n_out)):
+                    lanes = []
+                    for i in range(1, count + 1):
+                        points = displayed[(side, i)]
+                        self.assertEqual(points[-1] if side == "I" else points[0], enclosure)
+                        lanes.append(y_at(points, 30 if side == "I" else 70))
+                    # Each in its own lane: the stored line, then below it, never among the pass-by lanes.
+                    self.assertEqual(sorted(round(y, 9) for y in lanes),
+                                     sorted(round(-k * gap, 9) for k in range(count)))
+                # The first cable on each side runs straight in; the others bend in.
+                self.assertEqual(displayed[("I", 1)], [(0.0, 0.0), enclosure])
+                self.assertEqual(displayed[("O", 1)], [enclosure, (100.0, 0.0)])
 
-    def test_with_two_ending_cables_they_share_the_middle_and_bend_in(self):
+    def test_a_cable_joining_the_pass_by_lanes_at_the_next_enclosure_crosses_nothing(self):
         gap = 0.2
-        enclosure = (50.0, 0.0)
-        displayed = displace(
-            [
-                line(("L", 1), "A1", ((0, 0), enclosure)),
-                line(("L", 2), "A2", (enclosure, (100, 0))),
-                line(("L", 3), "D1", ((0, 0), enclosure)),
-                line(("L", 4), "D2", (enclosure, (100, 0))),
-                line(("L", 5), "B", ((0, 0), (100, 0))),
-                line(("L", 6), "C", ((0, 0), (100, 0))),
-            ],
-            gap,
-        )
-        for key in (("L", 1), ("L", 3)):
-            self.assertEqual(displayed[key][-1], enclosure)
-            self.assertAlmostEqual(abs(displayed[key][-2][1]), gap / 2)  # inner lanes, then a lead-in
-        for key in (("L", 5), ("L", 6)):
-            self.assertAlmostEqual(abs(ys_at(displayed[key], 50, window=10)[0]), 1.5 * gap)
+        lines = [line(("T", i), f"T{i}", ((0, 0), (100, 0))) for i in range(1, 4)]
+        lines += [line(("I", 1), "IN1", ((0, 0), (50, 0))),
+                  line(("O", 1), "OUT1", ((50, 0), (80, 0))),
+                  line(("O", 2), "OUT2", ((50, 0), (80, 0))),
+                  line(("O", 3), "OUT3", ((50, 0), (100, 0)))]  # passes the second enclosure at x = 80
+        displayed = displace(lines, gap)
 
-    def test_a_two_cable_stack_keeps_its_sides_when_one_ends(self):
-        displayed = displace(
-            [line(("L", 1), "A", ((0, 0), (100, 0))), line(("L", 2), "B", ((0, 0), (50, 0)))],
-            2.0,
-        )
-        self.assertAlmostEqual(ys_at(displayed[("L", 1)], 25, window=20)[0], -1.0)
-        self.assertAlmostEqual(ys_at(displayed[("L", 2)], 25, window=20)[0], 1.0)
-        self.assertEqual(displayed[("L", 2)][-1], (50.0, 0.0))
+        def order(x):
+            return [key for _y, key in sorted(((y_at(points, x), key) for key, points in displayed.items()
+                                               if y_at(points, x) is not None), reverse=True)]
+
+        # Lanes change halfway between the enclosures; the top-to-bottom order does not.
+        self.assertEqual(order(60), order(70))
+        self.assertEqual(order(70)[:4], order(90))
+        self.assertAlmostEqual(y_at(displayed[("O", 3)], 90), gap)  # beside the pass-by cables past x = 80
+
+    def test_lane_changes_are_ramps_not_steps(self):
+        gap = 0.2
+        lines = [line(("T", i), f"T{i}", ((0, 0), (100, 0))) for i in range(1, 4)]
+        lines += [line(("O", 1), "OUT1", ((50, 0), (80, 0))), line(("O", 3), "OUT3", ((50, 0), (100, 0)))]
+        for key, points in displace(lines, gap).items():
+            for (x0, y0), (x1, y1) in zip(points, points[1:]):
+                if abs(y1 - y0) > 1e-9:
+                    # Every sideways move is spread along the line, at most one gap across per gap along.
+                    self.assertGreaterEqual(abs(x1 - x0), abs(y1 - y0) - 1e-9, (key, points))
 
     def test_lead_in_never_takes_more_than_a_third_of_a_short_cable(self):
         displayed = displace(
