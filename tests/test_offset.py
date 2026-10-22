@@ -193,7 +193,7 @@ class OffsetTests(unittest.TestCase):
         )
         self.assertAlmostEqual(start_gap, gap)
 
-    def test_cables_split_at_an_enclosure_enter_it_and_through_cables_do_not(self):
+    def test_cables_split_at_an_enclosure_take_the_middle_lane_into_it(self):
         gap = 0.2
         enclosure = (50.0, 0.0)
         displayed = displace(
@@ -205,13 +205,41 @@ class OffsetTests(unittest.TestCase):
             ],
             gap,
         )
-        self.assertEqual(displayed[("L", 1)][-1], enclosure)
-        self.assertEqual(displayed[("L", 2)][0], enclosure)
-        # The lead-in is shallow: three times the sideways shift.
-        lead_in = displayed[("L", 1)][-2]
-        self.assertAlmostEqual(enclosure[0] - lead_in[0], 3 * abs(lead_in[1]))
-        # C passes the enclosure in its own lane.
-        self.assertTrue(all(abs(y - gap) < 1e-9 for y in ys_at(displayed[("L", 4)], 50, window=5)))
+        # The spliced cable runs straight into the enclosure on the stored line.
+        self.assertEqual(displayed[("L", 1)], [(0.0, 0.0), enclosure])
+        self.assertEqual(displayed[("L", 2)], [enclosure, (100.0, 0.0)])
+        # Through cables pass on either side, one gap away, without jogging.
+        for key, side in ((("L", 3), -gap), (("L", 4), gap)):
+            self.assertTrue(all(abs(y - side) < 1e-9 for y in ys_at(displayed[key], 50, window=10)))
+
+    def test_with_two_ending_cables_they_share_the_middle_and_bend_in(self):
+        gap = 0.2
+        enclosure = (50.0, 0.0)
+        displayed = displace(
+            [
+                line(("L", 1), "A1", ((0, 0), enclosure)),
+                line(("L", 2), "A2", (enclosure, (100, 0))),
+                line(("L", 3), "D1", ((0, 0), enclosure)),
+                line(("L", 4), "D2", (enclosure, (100, 0))),
+                line(("L", 5), "B", ((0, 0), (100, 0))),
+                line(("L", 6), "C", ((0, 0), (100, 0))),
+            ],
+            gap,
+        )
+        for key in (("L", 1), ("L", 3)):
+            self.assertEqual(displayed[key][-1], enclosure)
+            self.assertAlmostEqual(abs(displayed[key][-2][1]), gap / 2)  # inner lanes, then a lead-in
+        for key in (("L", 5), ("L", 6)):
+            self.assertAlmostEqual(abs(ys_at(displayed[key], 50, window=10)[0]), 1.5 * gap)
+
+    def test_a_two_cable_stack_keeps_its_sides_when_one_ends(self):
+        displayed = displace(
+            [line(("L", 1), "A", ((0, 0), (100, 0))), line(("L", 2), "B", ((0, 0), (50, 0)))],
+            2.0,
+        )
+        self.assertAlmostEqual(ys_at(displayed[("L", 1)], 25, window=20)[0], -1.0)
+        self.assertAlmostEqual(ys_at(displayed[("L", 2)], 25, window=20)[0], 1.0)
+        self.assertEqual(displayed[("L", 2)][-1], (50.0, 0.0))
 
     def test_lead_in_never_takes_more_than_a_third_of_a_short_cable(self):
         displayed = displace(

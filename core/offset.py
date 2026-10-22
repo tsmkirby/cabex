@@ -71,11 +71,17 @@ def displace(
     ]
     displayed = dict(originals)
     for index, line in enumerate(prepared):
-        displayed[line.key] = _display_line(index, prepared, intervals[index], gap)
+        displayed[line.key] = _display_line(index, prepared, intervals[index], gap, tolerance)
     return displayed
 
 
-def _display_line(index: int, lines: Sequence[CableLine], intervals: dict[int, list[tuple[float, float]]], gap: float) -> list[Point]:
+def _display_line(
+    index: int,
+    lines: Sequence[CableLine],
+    intervals: dict[int, list[tuple[float, float]]],
+    gap: float,
+    tolerance: float = _ON_TOP_M,
+) -> list[Point]:
     line = lines[index]
     stations = _stations(line.coords)
     pieces = _pieces(stations[-1], intervals)
@@ -90,7 +96,9 @@ def _display_line(index: int, lines: Sequence[CableLine], intervals: dict[int, l
         else:
             members = [line] + [lines[other] for other in sorted(neighbors)]
             sample = _point_at(line.coords, stations, (start + end) / 2.0)
-            offsets, normal = _lane_offsets(members, sample, gap)
+            ends = _ending_members(members, (_point_at(line.coords, stations, start),
+                                             _point_at(line.coords, stations, end)), tolerance)
+            offsets, normal = _lane_offsets(members, sample, gap, ends)
             chunk = _offset_points(part, offsets.get(line.key, 0.0), normal)
         if output and chunk and _near(output[-1], chunk[0]):
             output.extend(chunk[1:])
@@ -130,7 +138,28 @@ def _taper(points: list[Point], end: Point, gap: float, budget: float) -> list[P
     return [end, points[-1]]
 
 
-def _lane_offsets(members: Sequence[CableLine], sample: Point, gap: float) -> tuple[dict[tuple, float], Point]:
+def _ending_members(members: Sequence[CableLine], boundaries: Sequence[Point], tolerance: float) -> frozenset:
+    """Keys of the stack members that end at a boundary of this piece while others carry on.
+
+    Each member sees the same boundary points, so every line in the stack
+    agrees on the result. A boundary where every member ends, such as a
+    shared terminal, marks nobody.
+    """
+    found = set()
+    for point in boundaries:
+        here = {line.key for line in members
+                if _distance(line.coords[0], point) <= tolerance or _distance(line.coords[-1], point) <= tolerance}
+        if here and len(here) < len(members):
+            found |= here
+    return frozenset(found)
+
+
+def _lane_offsets(
+    members: Sequence[CableLine],
+    sample: Point,
+    gap: float,
+    ends: frozenset = frozenset(),
+) -> tuple[dict[tuple, float], Point]:
     reference = min(members, key=lambda line: (line.cable_id, line.key))
     origin, tangent = _closest_point_and_tangent(reference.coords, sample)
     normal = _canonical_normal(tangent)
@@ -142,6 +171,14 @@ def _lane_offsets(members: Sequence[CableLine], sample: Point, gap: float) -> tu
             signed = 0.0
         ranked.append((signed, line.cable_id, line.key, line))
     ranked.sort()
+    if ends and len(ends) < len(ranked):
+        # Cables that end here take the middle lanes, so they run straight into
+        # the enclosure or pole and no through cable is drawn across it.
+        # Through cables keep the side they would have had anyway.
+        middle = (len(ranked) - 1) / 2.0
+        left = [item for rank, item in enumerate(ranked) if item[2] not in ends and rank <= middle]
+        right = [item for rank, item in enumerate(ranked) if item[2] not in ends and rank > middle]
+        ranked = left + [item for item in ranked if item[2] in ends] + right
     count = len(ranked)
     mean = sum(item[0] for item in ranked) / count
     offsets = {}
